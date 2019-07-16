@@ -38,8 +38,8 @@
     open_doc/3,
     open_doc_revs/6,
     changes_since/5,
-    db_uri/1,
-    normalize_db/1
+    db_uri/1
+    db_from_map/1,
     ]).
 
 -import(couch_replicator_httpc, [
@@ -57,21 +57,19 @@
 -define(MAX_URL_LEN, 7000).
 -define(MIN_URL_LEN, 200).
 
-db_uri(#httpdb{url = Url}) ->
+db_uri(#{<<"url">> := Url}) ->
     couch_util:url_strip_password(Url);
 
-db_uri(DbName) when is_binary(DbName) ->
-    ?b2l(DbName);
-
-db_uri(Db) ->
-    db_uri(couch_db:name(Db)).
+db_uri(#httpdb{url = Url}) ->
+    couch_util:url_strip_password(Url).
 
 
-db_open(Db) ->
-    db_open(Db, false, []).
+db_open(#{} = Db) ->
+    db_open(Db, false, []);
 
-db_open(#httpdb{} = Db1, Create, CreateParams) ->
-    {ok, Db} = couch_replicator_httpc:setup(Db1),
+
+db_open(#{} = Db0, Create, CreateParams) ->
+    {ok, Db} = couch_replicator_httpc:setup(db_from_json(Db0)),
     try
         case Create of
         false ->
@@ -148,6 +146,7 @@ get_pending_count(#httpdb{} = Db, Seq) ->
     send_req(Db, Options, fun(200, _, {Props}) ->
         {ok, couch_util:get_value(<<"pending">>, Props, null)}
     end).
+
 
 get_view_info(#httpdb{} = Db, DDocId, ViewName) ->
     Path = io_lib:format("~s/_view/~s/_info", [DDocId, ViewName]),
@@ -285,7 +284,6 @@ open_doc_revs(#httpdb{} = HttpDb, Id, Revs, Options, Fun, Acc) ->
             open_doc_revs(RetryDb, Id, Revs, Options, Fun, Acc)
     end.
 
-
 error_reason({http_request_failed, "GET", _Url, {error, timeout}}) ->
     timeout;
 error_reason({http_request_failed, "GET", _Url, {error, {_, req_timedout}}}) ->
@@ -355,7 +353,6 @@ update_doc(#httpdb{} = HttpDb, #doc{id = DocId} = Doc, Options, Type) ->
                     {error, Error}
                 end
         end).
-
 
 update_docs(Db, DocList, Options) ->
     update_docs(Db, DocList, Options, interactive_edit).
@@ -889,23 +886,6 @@ header_value(Key, Headers, Default) ->
     end.
 
 
-% Normalize an #httpdb{} or #db{} record such that it can be used for
-% comparisons. This means remove things like pids and also sort options / props.
-normalize_db(#httpdb{} = HttpDb) ->
-    #httpdb{
-        url = HttpDb#httpdb.url,
-        auth_props = lists:sort(HttpDb#httpdb.auth_props),
-        headers = lists:keysort(1, HttpDb#httpdb.headers),
-        timeout = HttpDb#httpdb.timeout,
-        ibrowse_options = lists:keysort(1, HttpDb#httpdb.ibrowse_options),
-        retries = HttpDb#httpdb.retries,
-        http_connections = HttpDb#httpdb.http_connections
-    };
-
-normalize_db(<<DbName/binary>>) ->
-    DbName.
-
-
 maybe_append_create_query_params(Db, []) ->
     Db;
 
@@ -914,27 +894,72 @@ maybe_append_create_query_params(Db, CreateParams) ->
     Db#httpdb{url = NewUrl}.
 
 
--ifdef(TEST).
+db_from_json(#{} = DbMap) ->
+    #{
+        <<"url">> := Url,
+        <<"auth">> := Auth,
+        <<"headers">> := Headers0,
+        <<"ibrowse_options">> := IBrowseOptions0,
+        <<"timeout">> := Timeout,
+        <<"http_connections">> := HttpConnections,
+        <<"retries">> := Retries,
+        <<"proxy_url">> := ProxyURL0
+    } = DbMap,
+    Headers = maps:fold(fun(K, V, Acc) ->
+        [{binary_to_list(K), binary_to_list(V)} | Acc]
+    end, [], Headers0),
+    IBrowseOptions0 = maps:fold(fun
+        (<<"proxy_protocol">>, V, Acc) ->
+            [{binary_to_atom(K), binary_to_existing_atom(V)} | Acc];
+        (<<"socket_options">>, #{} = SockOpts, Acc) ->
+            SockOptsKVs = maps:fold(fun sock_opts_fold/3, [], SockOpts),
+            [{socket_options, SockOptsKVs} | Acc];
+        (<<"ssl_options">>, #{} = SslOpts, Acc) ->
+            SslOptsKVs = maps:fold(fun ssl_opts_fold/3, [], SslOpts),
+            [{ssl_options, SslOptsKVs} | Acc];
+        (K, V, Acc) when is_binary(V) ->
+            [{binary_to_atom(K), binary_to_list(V)} | Acc];
+        (K, V, Acc) ->
+            [{binary_to_atom(K), V} | Acc]
+    end, [], IBrowseOptions0),
+    ProxyUrl = case ProxyUrl0 of
+        null -> undefined,
+        V when is_binary(V) -> binary_to_list(V)
+    end,
+    #httpdb{
+        url = binary_to_list(Url),
+        auth_props = maps:to_list(Auth),
+        headers = Headers,
+        ibrowse_options = IBrowseOptions,
+        timeout = Timeout,
+        http_connections = HttpConnections,
+        retries = Retries,
+        proxy_url = ProxyURL
+    }.
 
--include_lib("eunit/include/eunit.hrl").
 
 
-normalize_http_db_test() ->
-    HttpDb =  #httpdb{
-        url = "http://host/db",
-        auth_props = [{"key", "val"}],
-        headers = [{"k2","v2"}, {"k1","v1"}],
-        timeout = 30000,
-        ibrowse_options = [{k2, v2}, {k1, v1}],
-        retries = 10,
-        http_connections = 20
-    },
-    Expected = HttpDb#httpdb{
-        headers = [{"k1","v1"}, {"k2","v2"}],
-        ibrowse_options = [{k1, v1}, {k2, v2}]
-    },
-    ?assertEqual(Expected, normalize_db(HttpDb)),
-    ?assertEqual(<<"local">>, normalize_db(<<"local">>)).
+% See couch_replicator_docs:ssl_params/1 for ssl parsed options
+% and http://erlang.org/doc/man/ssl.html#type-server_option
+% all latest SSL server options
+%
+ssl_opts_fold(K, V, Acc) when is_boolean(V); is_integer(V) ->
+    [{binary_to_atom(K), V} | Acc];
+
+ssl_opts_fold(K, null, Acc) ->
+    [{binary_to_atom(K), undefined} | Acc];
+
+ssl_opts_fold(<<"verify">>, V, Acc) ->
+    [{binary_to_atom(K), binary_to_atom(V)};
+
+ssl_opts_fold(K, V, Acc) when is_list(V) ->
+    [{binary_to_atom(K), binary_to_list(V)} | Acc].
 
 
--endif.
+% See ?VALID_SOCK_OPTS in couch_replicator_docs for accepted socket options
+%
+sock_opts_fold(K, V, Acc) when is_list(V) ->
+     [{binary_to_atom(K), binary_to_atom(V)} | Acc];
+
+sock_opts_fold(K, V, Acc) when is_boolean(V); is_integer(V) ->
+    [{binary_to_atom(K), V} | Acc].

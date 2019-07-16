@@ -88,22 +88,24 @@ fetch(DDocName, FilterName, Source) ->
 
 
 % Get replication type and view (if any) from replication document props
--spec view_type([_], [_]) ->
-    {view, {binary(), binary()}} | {db, nil} | {error, binary()}.
-view_type(Props, Options) ->
-    case couch_util:get_value(<<"filter">>, Props) of
-        <<"_view">> ->
-            {QP}  = couch_util:get_value(query_params, Options, {[]}),
-            ViewParam = couch_util:get_value(<<"view">>, QP),
-            case re:split(ViewParam, <<"/">>) of
-                [DName, ViewName] ->
-                    {view, {<< "_design/", DName/binary >>, ViewName}};
-                _ ->
-                    {error, <<"Invalid `view` parameter.">>}
-            end;
+-spec view_type(#{}, [_]) ->
+    {binary(), #{}} | {error, binary()}.
+view_type(#{<<"filter">> := <<"_view">>}, Options) ->
+    {QP}  = couch_util:get_value(query_params, Options, {[]}),
+    ViewParam = couch_util:get_value(<<"view">>, QP),
+    case re:split(ViewParam, <<"/">>) of
+        [DName, ViewName] ->
+            DDocMap = #{
+                <<"ddoc">> => <<"_design/",DName/binary>>,
+                <<"view">> => ViewName
+            },
+            {<<"view">>, DDocMap};
         _ ->
-            {db, nil}
-    end.
+            {error, <<"Invalid `view` parameter.">>}
+    end;
+
+view_type(#{}, [_] = Options) ->
+    {<<"db">>, #{}}.
 
 
 % Private functions
