@@ -29,7 +29,6 @@
 
 -export([
     during_doc_update/3,
-    after_db_create/1,
     after_db_delete/1
 ]).
 
@@ -56,30 +55,16 @@
 -define(INITIAL_BACKOFF_EXPONENT, 64).
 -define(MIN_FILTER_DELAY_SEC, 60).
 
--type filter_type() ::  nil | view | user | docids | mango.
 -type repstate() :: initializing | error | scheduled.
 
 
--record(rdoc, {
-    id :: db_doc_id() | '_' | {any(), '_'},
-    state :: repstate() | '_',
-    rep :: #rep{} | nil | '_',
-    rid :: rep_id() | nil | '_',
-    filter :: filter_type() | '_',
-    info :: binary() | nil | '_',
-    errcnt :: non_neg_integer() | '_',
-    worker :: reference() | nil | '_',
-    last_updated :: erlang:timestamp() | '_'
-}).
+-define(MAX_ACCEPTORS, 10).
+-define(MAX_JOBS, 500).
 
 
 during_doc_update(#doc{} = Doc, Db, _UpdateType) ->
     couch_stats:increment_counter([couch_replicator, docs, db_changes]),
     ok = process_change(Db, Doc).
-
-after_db_create(#{name := DbName}) ->
-    couch_stats:increment_counter([couch_replicator, docs, dbs_created]),
-    couch_replicator_docs:ensure_rep_ddoc_exists(DbName).
 
 
 after_db_delete(#{name := DbName}) ->
@@ -112,16 +97,16 @@ process_change(#{name := DbName} = Db, #doc{} = Doc) ->
     DocState = get_json_value(<<"_replication_state">>, Props, null),
     case couch_jobs:get_job_data(Db, ?REP_DOCS, docs_job_id(DbName, DocId)) of
         {error, not_found} ->
-            update_replication_job(Db, DbName, DocId, Rep, RepError, DocState);
-        {ok, #{<<"rep">> := null, <<"rep_parse_error">> := RepError}}
+            add_rep_doc_job(Db, DbName, DocId, Rep, RepError, DocState);
+        {ok, #{?REP := null, ?REP_PARSE_ERROR := RepError}}
                 when Rep =:= null ->
             % Same error as before occurred, don't bother updating the job
             ok;
-        {ok, #{<<"rep">> := null}} when Rep =:= null ->
+        {ok, #{?REP := null}} when Rep =:= null ->
             % Error occured but it's a different error. Update the job so user
             % sees the new error
-            update_replication_job(Db, DbName, DocId, Rep, RepError, DocState);
-        {ok, #{<<"rep">> := OldRep, <<"rep_parse_error">> := OldError}} ->
+            add_rep_doc_job(Db, DbName, DocId, Rep, RepError, DocState);
+        {ok, #{?REP := OldRep, ?REP_PARSE_ERROR := OldError}} ->
             NormOldRep = couch_replicator_util:normalize_rep(OldRep),
             NormRep = couch_replicator_util:normalize_rep(Rep),
             case NormOldRep == NormRep of
@@ -130,10 +115,12 @@ process_change(#{name := DbName} = Db, #doc{} = Doc) ->
                     % for the replication job have changed, so make it a no-op
                     ok;
                 false ->
-                    update_replication_job(Db, DbName, DocId, Rep, RepError,
+                    add_rep_doc_job(Db, DbName, DocId, Rep, RepError,
                         DocState)
             end
     end.
+
+
 
 
 rep_docs_job_execute(#{} = Job, #{<<"rep">> := null} = JobData) ->
@@ -206,53 +193,226 @@ process_updated({DbName, _DocId} = Id, JsonRepDoc) ->
     gen_server:call(?MODULE, {updated, Id, Rep, Filter}, infinity).
 
 
-% Doc processor gen_server API and callbacks
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [],  []).
 
 
 init([]) ->
-    ?MODULE = ets:new(?MODULE, [named_table, {keypos, #rdoc.id},
-        {read_concurrency, true}, {write_concurrency, true}]),
-    {ok, nil}.
+    process_flag(trap_exit, true),
+    St = #{
+        acceptors => #{},
+        workers => #{}
+    },
+    {ok, update_config(St), 0}.
 
 
-terminate(_Reason, _State) ->
+terminate(_Reason, #{} = St) ->
+    #{workers := Workers, acceptors := Acceptors},
+    lists:foreach(fun(WPid) -> unlink(Pid), exit(Pid, 9) end, Workers),
+    couch_replicator_job_acceptor:stop(Acceptors),
     ok.
 
 
-handle_call({updated, Id, Rep, Filter}, _From, State) ->
-    ok = updated_doc(Id, Rep, Filter),
-    {reply, ok, State};
-
-handle_call({removed, Id}, _From, State) ->
-    ok = removed_doc(Id),
-    {reply, ok, State};
-
-handle_call({completed, Id}, _From, State) ->
-    true = ets:delete(?MODULE, Id),
-    {reply, ok, State};
-
-handle_call({clean_up_replications, DbName}, _From, State) ->
-    ok = removed_db(DbName),
-    {reply, ok, State}.
-
-handle_cast(Msg, State) ->
-    {stop, {error, unexpected_message, Msg}, State}.
+handle_call(Msg, _From, #{} = St) ->
+    {stop, {bad_call, Msg}, {bad_call, Msg}, St}.
 
 
-handle_info({'DOWN', _, _, _, #doc_worker_result{id = Id, wref = Ref,
-        result = Res}}, State) ->
-    ok = worker_returned(Ref, Id, Res),
-    {noreply, State};
+handle_cast({?ACCEPTED_JOB, Job, JobData}, #{} = St) ->
+    {noreply, execute_rep_doc_job(Job, JobData, St)};
 
-handle_info(_Msg, State) ->
-    {noreply, State}.
+handle_cast(Msg, #{} = St) ->
+    {stop, {bad_cast, Msg}, St}.
+
+
+handle_info({'EXIT', Pid, Reason}, #{} = St) ->
+    #{workers := Workers, acceptors := Acceptors} = St,
+    case {maps:is_key(Pid, Acceptors), maps:is_key(Pid, Workers)} of
+        {false, false} -> handle_unknown_pid(Pid, Reason, St);
+        {true, false} -> handle_acceptor_died(Pid, Reason, St);
+        {false, true} -> handle_worker_died(Pid, Reason, St)
+    end;
+
+handle_info(timeout, #{} = St) ->
+    {noreply, maybe_start_acceptors(St)};
+
+handle_info(Msg, St) ->
+    {stop, {bad_info, Msg}, St}.
+
+
+%% handle_info({'DOWN', _, _, _, #doc_worker_result{id = Id, wref = Ref,
+%%         result = Res}}, State) ->
+%%     ok = worker_returned(Ref, Id, Res),
+%%     {noreply, State};
 
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+
+update_config(#{} = St) ->
+    MaxJobs = config:get_integer("replicator",
+        "max_doc_processor_jobs", ?MAX_JOBS),
+    MaxAcceptors = config:get_integer("replicator",
+        "max_doc_processor_acceptors", ?MAX_ACCEPTORS),
+    AcceptTimeoutSec = config:get_integer("replicator",
+        "doc_processor_accept_timeout_sec", ?ACCEPT_TIMEOUT_SEC),
+    AcceptFudgeSec = config:get_integer("replicator",
+        "doc_processor_accept_fudge_sec", ?ACCEPT_FUDGE_SEC),
+    St#{
+        max_jobs => MaxJobs,
+        max_acceptors => MaxAcceptors,
+        accept_timeout_sec => AcceptTimeoutSec,
+        accept_fudge_sec => AcceptFudgeSec,
+    }.
+
+
+handle_acceptor_died(Pid, normal, #{acceptors := Acceptors} = St1) ->
+    St2 = St1#{acceptors := maps:remove(Pid, Acceptors)},
+    St3 = update_config(St2),
+    St4 = maybe_start_acceptors(St3),
+    {noreply, St4};
+
+handle_acceptor_died(Pid, Error, #{acceptors := Acceptors} = St) ->
+    Msg = "~p : acceptor ~p died with ~p",
+    couch_log:error(Msg, [?ERROR, Pid, Reason]),
+    {stop, {acceptor_pid_exit, Pid, Reason}, St}.
+
+
+handle_worker_died(Pid, normal, #{workers := Workers} = St1) ->
+    St2 = St1#{workers := maps:remove(Pid, Workers)},
+    St3 = maybe_start_acceptors(St2),
+    {noreply, St3};
+
+handle_worker_died(Pid, Error, #{workers := Workers} = St) ->
+    Msg = "~p : acceptor ~p died with ~p",
+    couch_log:error(Msg, [?ERROR, Pid, Reason]),
+    {stop, {worker_pid_exit, Pid, Reason}, St}.
+
+
+handle_unknown_pid(Pid, Reason, #{} = St) ->
+    Msg = "~p : unknown pid ~p died with ~p",
+    couch_log:error(Msg, [?MODULE, Pid, Reason]),
+    {stop, {unknown_pid_exit, Pid, Reason}, St};
+
+
+maybe_start_acceptors(#st{} = St1) when
+    St2 = update_config(St1),
+    #{
+        workers := Workers,
+        acceptors := Acceptors,
+        max_jobs := MaxJobs,
+        max_acceptors := MaxAcceptors
+    } = St2,
+    WCount = map_size(Workers),
+    ACount = map_size(Acceptors),
+    case ACount + WCount < MaxJobs of
+        true -> start_acceptors(MaxAcceptors - ACount, St2);
+        false -> St2
+    end.
+
+
+start_acceptors(N, #st{} = St) ->
+    St#{
+       acceptors := Acceptors,
+       accept_timeout_sec := TimeoutSec,
+       accept_fudge_sec := FudgeSec
+    },
+    Opts = #{
+        timeout = TimeoutSec,
+        max_sched_time = erlang:system_time(second) + FudgeSec
+    },
+    Pids = couch_replicator_acceptor:start(?REP_DOCS, N, self(), Opts),
+    St#{acceptors := maps:merge(Acceptors, Pids)}.
+
+
+start_worker(Job, #{} = JobData, #{workers := Workers} = St) ->
+    Parent  = self(),
+    Pid = spawn_link(fun() -> rep_doc_job_worker(Job, JobData, Parent) end),
+    St#{workers := Workers#{Pid => true}}.
+
+
+rep_doc_job_worker(Job, #{?REP := null} = RepDocData, Parent) ->
+    #{
+        ?REP_PARSE_ERROR := Error,
+        ?DB_NAME := DbName,
+        ?DOC_ID := DocId
+        ?ERROR_COUNT := ErrorCount,
+    } = RepDocData,
+    RepDocData1 = RepDocData#{
+        ?LAST_UPDATED := erlang:system_time(),
+        ?ERROR_COUNT := ErrorCount + 1,
+        ?FINISHED_STATE := ?FAILED,
+        ?FINISHED_RESULT := Error,
+    },
+    case couch_jobs:finish(undefined, Job, RepDocData1) of
+        ok ->
+            couch_replicator_docs:update_failed(DbName, DocId, Error),
+            St;
+        {error, JobError} ->
+            Msg = "~p : replication ~s job could not finish. JobError:~p",
+            couch_log:error(Msg, [?MODULE, RepId, JobError]),
+            St
+    end;
+
+rep_doc_job_worker(Job, #{?REP := #{}} = RepDocData, Parent) ->
+    #{
+        ?REP := Rep1,
+        ?DOC_STATE := DocState,
+    } = RepDocData,
+    ok = remove_old_state_fields(Rep, DocState),
+    % Calculate replication ID. In most case this is fast and easy
+    % but for filtered replications with user JS filters this
+    % means making a remote connection to the source db.
+    Rep2 = #{<<"id">> := RepId} = couch_replicator_docs:update_rep_id(Rep1),
+    try
+        couch_jobs_fdb:tx(couch_jobs_fdb:get_jtx(Tx), fun(JTx) ->
+            maybe_start_replication_job(JTx, Rep)
+        end)
+    catch
+        throw:{job_start_error, halt} ->
+            Msg = "~p : replication doc job ~s lock conflict",
+            couch_log:error(Msg, [?MODULE, RepId]),
+            exit(normal);
+        throw:{job_start_error, Error} ->
+            Msg = "~p : replication job start failed ~slock conflict",
+            couch_log:error(Msg, [?MODULE, RepId])
+    end.
+
+
+maybe_start_replication_job(JTx, Rep) ->
+     case couch_jobs:get_job_data(JTx, ?REP_JOBS, RepId) of
+        {error, not_found} ->
+            RepJobData = #{
+                ?REP := Rep2,
+                ?STATE := ST_PENDING,
+                ?STATE_INFO := null,
+            },
+            ok = couch_jobs:add(JTx, ?REP_JOBS, RepJobData),
+            RepDocData1 = RepDocData#{
+                ?REP := Rep2,
+                ?STATE := ST_SCHEDULED,
+                ?STATE_INFO := null,
+                ?ERROR_COUNT := 0,
+                ?LAST_UPDATED => erlang:system_info()
+            },
+            case couch_jobs:finish(JTx, Job, RepDocData1) of
+                ok -> ok;
+                Error -> throw({job_start_error, Error})
+
+remove_old_state_fields(#{} = Rep, ?TRIGGERED) ->
+    case update_docs() of
+        true -> ok;
+        false -> couch_replicator_docs:remove_state_fields(DbName, DocId)
+    end;
+
+remove_old_state_fields(#{} = Rep, ?ERROR) ->
+    case update_docs() of
+        true -> ok;
+        false -> couch_replicator_docs:remove_state_fields(DbName, DocId)
+    end;
+
+maybe_remove_old_state_fields(#{} = _Rep, _) ->
+    ok.
 
 
 % Doc processor gen_server private helper functions
@@ -592,20 +752,24 @@ ejson_doc_state_filter(State, States) when is_list(States), is_atom(State) ->
     lists:member(State, States).
 
 
--spec update_replication(any(), binary(), binary(), #{} | null,
+-spec add_rep_doc_job(any(), binary(), binary(), #{} | null,
     binary() | null, binary() | null) -> ok.
-update_replication_job(Tx, DbName, DocId, Rep, RepParseError, DocState) ->
+add_rep_doc_job(Tx, DbName, DocId, Rep, RepParseError, DocState) ->
     JobId = docs_job_id(DbName, DocId),
     ok = remove_replication_by_doc_job_id(Db, JobId),
-    RepDocsJob = #{
-        <<"rep_id">> := null,
-        <<"db_name">> := DbName,
-        <<"doc_id">> := DocId,
-        <<"rep">> := Rep,
-        <<"rep_parse_error">> := RepParseError,
-        <<"doc_state">> := DocState
+    RepDocData = #{
+        ?REP => Rep,
+        ?REP_PARSE_ERROR => RepParseError,
+        ?DOC_STATE => DocState,
+        ?DB_NAME => DbName,
+        ?DOC_ID => DocId,
+        ?STATE => ST_INITIALIZING,
+        ?ERROR_COUNT => 0,
+        ?LAST_UPDATED => erlang:system_time(),
+        ?STATE => null,
+        ?STATE_INFO => null.
     },
-    ok = couch_jobs:add(Tx, ?REP_DOCS, RepDocsJob).
+    ok = couch_jobs:add(Tx, ?REP_DOCS, RepDocData).
 
 
 docs_job_id(DbName, Id) when is_binary(DbName), is_binary(Id) ->
@@ -617,10 +781,10 @@ remove_replication_by_doc_job_id(Tx, Id) ->
     case couch_jobs:get_job_data(Tx, ?REP_DOCS, Id) of
         {error, not_found} ->
             ok;
-        {ok, #{<<"rep_id">> := null}} ->
+        {ok, #{?REP := {<<"id">> :=  null}}} ->
             couch_jobs:remove(Tx, ?REP_DOCS, Id),
             ok;
-        {ok, #{<<"rep_id">> := RepId}} ->
+        {ok, #{?REP := {<<"id">> := RepId}}} ->
             couch_jobs:remove(Tx, ?REP_JOBS, RepId),
             couch_jobs:remove(Tx, ?REP_DOCS, Id),
             ok

@@ -52,8 +52,8 @@
     {ok, {cancelled, binary()}} |
     {error, any()} |
     no_return().
-replicate(PostBody, UserCtx) ->
-    {ok, Rep0} = couch_replicator_utils:parse_rep_doc(PostBody, UserCtx),
+replicate(PostBody, #user_ctx{name = UserName}) ->
+    {ok, Rep0} = couch_replicator_utils:parse_rep_doc(PostBody, UserName),
     Rep = Rep0#{<<"start_time">> => erlang:system_time()},
     #{<<"id">> := RepId, <<"options">> := Options} = Rep,
     case maps:get(<<"cancel">>, Options, false) of
@@ -80,9 +80,14 @@ replicate(PostBody, UserCtx) ->
 % it returns `ignore`.
 -spec ensure_rep_db_exists() -> ignore.
 ensure_rep_db_exists() ->
-    ok = couch_replicator_docs:ensure_rep_db_exists(),
     couch_jobs:set_type_timeout(?REP_DOCS, ?REP_DOCS_TIMEOUT_MSEC),
     couch_jobs:set_type_timeout(?REP_JOBS, ?REP_JOBS_TIMEOUT_MSEC),
+    case config:get_boolean("replicator", "create_replicator_db", false) of
+        true ->
+            ok = couch_replicator_docs:ensure_rep_db_exists();
+        false ->
+            ok
+    end,
     ignore.
 
 

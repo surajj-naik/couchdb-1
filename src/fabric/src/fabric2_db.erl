@@ -787,7 +787,7 @@ maybe_add_sys_db_callbacks(Db) ->
                 fun couch_replicator_docs:before_doc_update/3,
                 fun couch_replicator_doc_processor:during_doc_update/3,
                 fun couch_replicator_docs:after_doc_read/2,
-                fun couch_replicator_doc_processor:after_db_create/1,
+                undefined,
                 fun couch_replicator_doc_processor:after_db_delete/1
             };
         IsUsersDb ->

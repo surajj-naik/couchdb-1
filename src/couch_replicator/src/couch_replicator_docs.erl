@@ -138,70 +138,17 @@ update_error(#rep{} = Rep, Error) ->
 
 -spec ensure_rep_db_exists() -> ok.
 ensure_rep_db_exists() ->
-    Opts = [?CTX, sys_db, nologifmissing],
-    case fabric2_db:create(?REP_DB_NAME, Opts) of
-        {error, file_exists} ->
-            ok;
-        {ok, _Db} ->
-            ok
+    Opts = [?CTX, sys_db],
+    case fabric2_db:create(?REP_DB_NAME, [?CTX, sys_db]) of
+        {error, file_exists} -> ok;
+        {ok, _Db} -> ok
     end.
-
-
--spec ensure_rep_ddoc_exists(binary()) -> ok.
-ensure_rep_ddoc_exists(RepDb) ->
-    DDocId = ?REP_DESIGN_DOC,
-    case open_rep_doc(RepDb, DDocId) of
-        {not_found, database_does_not_exist} ->
-            %% database was deleted.
-            ok;
-        {not_found, _Reason} ->
-            DocProps = replication_design_doc_props(DDocId),
-            DDoc = couch_doc:from_json_obj({DocProps}),
-            couch_log:notice("creating replicator ddoc ~p", [RepDb]),
-            {ok, _Rev} = save_rep_doc(RepDb, DDoc);
-        {ok, Doc} ->
-            Latest = replication_design_doc_props(DDocId),
-            {Props0} = couch_doc:to_json_obj(Doc, []),
-            {value, {_, Rev}, Props} = lists:keytake(<<"_rev">>, 1, Props0),
-            case compare_ejson({Props}, {Latest}) of
-                true ->
-                    ok;
-                false ->
-                    LatestWithRev = [{<<"_rev">>, Rev} | Latest],
-                    DDoc = couch_doc:from_json_obj({LatestWithRev}),
-                    couch_log:notice("updating replicator ddoc ~p", [RepDb]),
-                    try
-                        {ok, _} = save_rep_doc(RepDb, DDoc)
-                    catch
-                        throw:conflict ->
-                            %% ignore, we'll retry next time
-                            ok
-                    end
-            end
-    end,
-    ok.
-
-
--spec compare_ejson({[_]}, {[_]}) -> boolean().
-compare_ejson(EJson1, EJson2) ->
-    EjsonSorted1 = couch_replicator_filters:ejsort(EJson1),
-    EjsonSorted2 = couch_replicator_filters:ejsort(EJson2),
-    EjsonSorted1 == EjsonSorted2.
-
-
--spec replication_design_doc_props(binary()) -> [_].
-replication_design_doc_props(DDocId) ->
-    [
-        {<<"_id">>, DDocId},
-        {<<"language">>, <<"javascript">>},
-        {<<"validate_doc_update">>, ?REP_DB_DOC_VALIDATE_FUN}
-    ].
 
 
 -spec parse_rep_doc_without_id({[_]}) -> #{}.
 parse_rep_doc_without_id(RepDoc) ->
     {ok, Rep} = try
-        parse_rep_doc_without_id(RepDoc, rep_user_name(RepDoc))
+        parse_rep_doc_without_id(RepDoc, null)
     catch
         throw:{error, Reason} ->
             throw({bad_rep_doc, Reason});
@@ -355,14 +302,6 @@ save_rep_doc(DbName, Doc) ->
             Msg = "~p VDU function preventing doc update to ~s ~s ~p",
             couch_log:error(Msg, [?MODULE, DbName, Doc#doc.id, Reason]),
             {ok, forbidden}
-    end.
-
-
--spec rep_user_name({[_]}) -> binary() | null.
-rep_user_name({RepDoc}) ->
-    case get_json_value(<<"user_ctx">>, RepDoc) of
-        undefined -> null;
-        {UserCtx} -> get_json_value(<<"name">>, UserCtx, null)
     end.
 
 
@@ -634,7 +573,8 @@ before_doc_update(#doc{body = {Body}} = Doc, Db, _UpdateType) ->
        roles = Roles,
        name = Name
     } = fabric2_db:get_user_ctx(Db),
-    case lists:member(<<"_replicator">>, Roles) of
+    IsReplicator = case lists:member(<<"_replicator">>, Roles),
+    Doc1 = case IsReplicator of
     true ->
         Doc;
     false ->
@@ -649,12 +589,21 @@ before_doc_update(#doc{body = {Body}} = Doc, Db, _UpdateType) ->
                 Doc#doc{body = {?replace(Body, ?OWNER, Name)}};
             ok ->
                 Doc;
-            _ ->
+            false ->
                 throw({forbidden, <<"Can't update replication documents",
                     " from other users.">>})
             end
         end
-    end.
+    end,
+    case IsReplicator orelse Doc1#doc.deleted of
+        true ->
+            ok;  % If replicator or deleting don't validate doc body
+        false ->
+            % Encode as a map and normalize all field names as binaries
+            BMap = ?JSON_DECODE(?JSON_ENCODE(Doc1#doc.body)),
+            couch_replicator_validate_doc:validate(BMap)
+    end,
+    Doc1.
 
 
 -spec after_doc_read(#doc{}, Db::any()) -> #doc{}.

@@ -87,8 +87,8 @@ start_link(#{] = Job, #{} = JobData) ->
         {ok, Pid} ->
             {ok, Pid};
         {error, Reason} ->
-            #{<<"rep">> := Rep} = JobData,
-            {<<"id">> := Id, <<"source">> := Src, <<"target">> := Ttg} = Rep,
+            #{?REP := Rep} = JobData,
+            {<<"id">> := Id, ?SOURCE := Src, ?TARGET := Ttg} = Rep,
             Source = couch_replicator_api_wrap:db_uri(Src),
             Target = couch_replicator_api_wrap:db_uri(Tgt),
             ErrMsg = "failed to start replication `~s` (`~s` -> `~s`)",
@@ -332,18 +332,18 @@ terminate(shutdown, #rep_state{id = RepId} = State) ->
 terminate({shutdown, max_backoff}, {error, {#{} = Job, #{} = JobData}}) ->
     % Here we handle the case when replication fails during initialization.
     % That is before the #rep_state{} is even built.
-    #{<<"rep">> := #{<<"id">> := RepId}} = JobData,
+    #{?REP := #{<<"id">> := RepId}} = JobData,
     couch_stats:increment_counter([couch_replicator, failed_starts]),
     couch_log:warning("Replication `~s` reached max backoff ", [RepId]),
     finish_couch_job(Job, JobData, <<"error">>, max_backoff);
 
 terminate({shutdown, {error, Error}}, {error, Class, Stack, {Job, JobData}}) ->
     % Here we handle the case when replication fails during initialization.
-    #{<<"rep">> := Rep} = JobData,
+    #{?REP := Rep} = JobData,
     #{
        <<"id">> := Id,
-       <<"source">> := Source0,
-       <<"target">> := Target0,
+       ?SOURCE := Source0,
+       ?TARGET := Target0,
        <<"doc_id">> := DocId,
        <<"db_name">> := DbName
     } = Rep,
@@ -525,7 +525,7 @@ finish_couch_job(#rep_state{} = State, FinishedState, Result) ->
 
 
 finish_couch_job(#{} = Job, #{} = JobData, FinishState, Result0) ->
-    #{<<"rep">> := #{<<"id">> := RepId}} = JobData,
+    #{?REP := #{<<"id">> := RepId}} = JobData,
     case Result of
         null -> null;
         #{} -> Result0;
@@ -534,8 +534,8 @@ finish_couch_job(#{} = Job, #{} = JobData, FinishState, Result0) ->
         Other -> couch_replicator_utils:rep_error_to_binary(Result0)
     end,
     JobData= JobData0#{
-        <<"finished_state">> => FinishState,
-        <<"finished_result">> => Result
+        ?FINISHED_STATE => FinishState,
+        ?FINISHED_RESULT => Result
     },
     case couch_jobs:finish(undefined, Job, JobData) of
         ok ->
@@ -566,18 +566,17 @@ cancel_timer(#rep_state{timer = Timer} = State) ->
     State#rep_state{timer = nil}.
 
 
-init_state(#{} = Job, #{<<"rep">> =: Rep}} = JobData) ->
+init_state(#{} = Job, #{?REP =: Rep}} = JobData) ->
     #{
         <<"id">> := Id,
         <<"base_id">> := BaseId,
-        <<"source">> := Src0,
-        <<"target">> := Tgt,
+        ?SOURCE := Src0,
+        ?TARGET := Tgt,
         <<"type">> := Type,
         <<"view">> := View,
         <<"start_time">> := StartTime,
         <<"stats">> := Stats,
         <<"options">> := OptionsMap,
-        <<"user_ctx">> := UserCtx,
         <<"db_name">> := DbName,
         <<"doc_id">> := DocId,
     } = Rep,
@@ -589,13 +588,9 @@ init_state(#{} = Job, #{<<"rep">> =: Rep}} = JobData) ->
     % Adjust minimum number of http source connections to 2 to avoid deadlock
     Src = adjust_maxconn(Src0, BaseId),
     {ok, Source} = couch_replicator_api_wrap:db_open(Src),
-    {CreateTargetParams} = get_value(create_target_params, Options, {[]}),
-    {ok, Target} = couch_replicator_api_wrap:db_open(Tgt,
-
     CreateTgt = get_value(create_target, Options, false),
-    CreateParams = maps:to_list(get_value(create_target_params, Options, #{}),
-    {ok, Target} = couch_replicator_api_wrap:db_open(Tgt, UserCtx, CreateTgt,
-        CreateParams),
+    TParams = maps:to_list(get_value(create_target_params, Options, #{}),
+    {ok, Target} = couch_replicator_api_wrap:db_open(Tgt, CreateTgt, TParams),
 
     {ok, SourceInfo} = couch_replicator_api_wrap:get_db_info(Source),
     {ok, TargetInfo} = couch_replicator_api_wrap:get_db_info(Target),
