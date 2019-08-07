@@ -370,7 +370,7 @@ build-test:
 mango-test: devclean all
 	@cd src/mango && \
 		python3 -m venv .venv && \
-		.venv/bin/pip3 install -r requirements.txt
+		.venv/bin/python3 -m pip3 install -r requirements.txt
 	@cd src/mango && ../../dev/run -n 1 --admin=testuser:testpass .venv/bin/nosetests
 
 ################################################################################

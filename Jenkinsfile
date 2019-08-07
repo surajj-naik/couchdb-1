@@ -26,7 +26,8 @@ cd apache-couchdb-*
 make
 cd src/mango
 python3 -m venv .venv
-.venv/bin/pip3 install -r requirements.txt
+cat .venv/bin/pip3
+.venv/bin/python3 -m pip3 install -r requirements.txt
 ../../dev/run -n 1 --admin=testuser:testpass .venv/bin/nosetests
 cd ../../
 make elixir || (build-aux/logfile-uploader.py && false)
@@ -97,7 +98,6 @@ pipeline {
           set
           rm -rf apache-couchdb-*
           ./configure --with-curl
-          make mango-test
           make dist
           chmod -R a+w * .
         '''
