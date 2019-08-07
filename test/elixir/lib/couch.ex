@@ -185,7 +185,7 @@ defmodule Couch do
     ib_options =
       Keyword.merge(
         Application.get_env(:httpotion, :default_ibrowse, []),
-        Keyword.get(options, :ibrowse, [])
+        Keyword.get(options, :ibrowse, [{:inactivity_timeout, 55_000}])
       )
 
     follow_redirects =
