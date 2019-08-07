@@ -465,6 +465,7 @@ pipeline {
               steps {
                 unstash 'tarball'
                 withEnv(['MIX_HOME='+pwd()]) {
+                  sh( 'mix hex.config' )
                   sh( script: build_and_test )
                 }
               }
