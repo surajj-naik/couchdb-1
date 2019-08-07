@@ -23,7 +23,7 @@ cd build
 tar -xf ${WORKSPACE}/apache-couchdb-*.tar.gz
 cd apache-couchdb-*
 ./configure --with-curl
-make check || (build-aux/logfile-uploader.py && false)
+make mango-test || (build-aux/logfile-uploader.py && false)
 '''
 
 make_packages = '''
