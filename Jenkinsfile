@@ -25,6 +25,8 @@ tar -xf ${WORKSPACE}/apache-couchdb-*.tar.gz
 cd apache-couchdb-*
 ./configure --with-curl
 make
+mix local.rebar --force
+mix local.hex --force
 mix hex
 mix hex.config
 make elixir || (build-aux/logfile-uploader.py && false)
