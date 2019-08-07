@@ -16,6 +16,7 @@
 // DRYing out the Jenkinsfile...
 
 build_and_test = '''
+set
 mkdir -p ${COUCHDB_IO_LOG_DIR}
 rm -rf build
 mkdir build
@@ -24,6 +25,8 @@ tar -xf ${WORKSPACE}/apache-couchdb-*.tar.gz
 cd apache-couchdb-*
 ./configure --with-curl
 make
+mix hex
+mix hex.config
 make elixir || (build-aux/logfile-uploader.py && false)
 '''
 
@@ -459,7 +462,6 @@ pipeline {
               steps {
                 unstash 'tarball'
                 withEnv(['MIX_HOME='+pwd()]) {
-                  sh( 'mix hex.config' )
                   sh( script: build_and_test )
                 }
               }
