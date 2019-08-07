@@ -35,88 +35,88 @@ teardown_each({SrcDb, TgtDb}) ->
     ok = couch_server:delete(TgtDb, []).
 
 
-% cpse_purge_http_replication({Source, Target}) ->
-%     {ok, Rev1} = cpse_util:save_doc(Source, {[{'_id', foo}, {vsn, 1}]}),
+cpse_purge_http_replication({Source, Target}) ->
+    {ok, Rev1} = cpse_util:save_doc(Source, {[{'_id', foo}, {vsn, 1}]}),
 
-%     cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
-%         {doc_count, 1},
-%         {del_doc_count, 0},
-%         {update_seq, 1},
-%         {changes, 1},
-%         {purge_seq, 0},
-%         {purge_infos, []}
-%     ]),
+    cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
+        {doc_count, 1},
+        {del_doc_count, 0},
+        {update_seq, 1},
+        {changes, 1},
+        {purge_seq, 0},
+        {purge_infos, []}
+    ]),
 
-%     RepObject = {[
-%         {<<"source">>, db_url(Source)},
-%         {<<"target">>, db_url(Target)}
-%     ]},
+    RepObject = {[
+        {<<"source">>, db_url(Source)},
+        {<<"target">>, db_url(Target)}
+    ]},
 
-%     {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
-%     {ok, Doc1} = cpse_util:open_doc(Target, foo),
+    {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
+    {ok, Doc1} = cpse_util:open_doc(Target, foo),
 
-%     cpse_util:assert_db_props(?MODULE, ?LINE, Target, [
-%         {doc_count, 1},
-%         {del_doc_count, 0},
-%         {update_seq, 1},
-%         {changes, 1},
-%         {purge_seq, 0},
-%         {purge_infos, []}
-%     ]),
+    cpse_util:assert_db_props(?MODULE, ?LINE, Target, [
+        {doc_count, 1},
+        {del_doc_count, 0},
+        {update_seq, 1},
+        {changes, 1},
+        {purge_seq, 0},
+        {purge_infos, []}
+    ]),
 
-%     PurgeInfos = [
-%         {cpse_util:uuid(), <<"foo">>, [Rev1]}
-%     ],
+    PurgeInfos = [
+        {cpse_util:uuid(), <<"foo">>, [Rev1]}
+    ],
 
-%     {ok, [{ok, PRevs}]} = cpse_util:purge(Source, PurgeInfos),
-%     ?assertEqual([Rev1], PRevs),
+    {ok, [{ok, PRevs}]} = cpse_util:purge(Source, PurgeInfos),
+    ?assertEqual([Rev1], PRevs),
 
-%     cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
-%         {doc_count, 0},
-%         {del_doc_count, 0},
-%         {update_seq, 2},
-%         {changes, 0},
-%         {purge_seq, 1},
-%         {purge_infos, PurgeInfos}
-%     ]),
+    cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
+        {doc_count, 0},
+        {del_doc_count, 0},
+        {update_seq, 2},
+        {changes, 0},
+        {purge_seq, 1},
+        {purge_infos, PurgeInfos}
+    ]),
 
-%     % Show that a purge on the source is
-%     % not replicated to the target
-%     {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
-%     {ok, Doc2} = cpse_util:open_doc(Target, foo),
-%     [Rev2] = Doc2#doc_info.revs,
-%     ?assertEqual(Rev1, Rev2#rev_info.rev),
-%     ?assertEqual(Doc1, Doc2),
+    % Show that a purge on the source is
+    % not replicated to the target
+    {ok, _} = couch_replicator:replicate(RepObject, ?ADMIN_USER),
+    {ok, Doc2} = cpse_util:open_doc(Target, foo),
+    [Rev2] = Doc2#doc_info.revs,
+    ?assertEqual(Rev1, Rev2#rev_info.rev),
+    ?assertEqual(Doc1, Doc2),
 
-%     cpse_util:assert_db_props(?MODULE, ?LINE, Target, [
-%         {doc_count, 1},
-%         {del_doc_count, 0},
-%         {update_seq, 1},
-%         {changes, 1},
-%         {purge_seq, 0},
-%         {purge_infos, []}
-%     ]),
+    cpse_util:assert_db_props(?MODULE, ?LINE, Target, [
+        {doc_count, 1},
+        {del_doc_count, 0},
+        {update_seq, 1},
+        {changes, 1},
+        {purge_seq, 0},
+        {purge_infos, []}
+    ]),
 
-%     % Show that replicating from the target
-%     % back to the source reintroduces the doc
-%     RepObject2 = {[
-%         {<<"source">>, db_url(Target)},
-%         {<<"target">>, db_url(Source)}
-%     ]},
+    % Show that replicating from the target
+    % back to the source reintroduces the doc
+    RepObject2 = {[
+        {<<"source">>, db_url(Target)},
+        {<<"target">>, db_url(Source)}
+    ]},
 
-%     {ok, _} = couch_replicator:replicate(RepObject2, ?ADMIN_USER),
-%     {ok, Doc3} = cpse_util:open_doc(Source, foo),
-%     [Revs3] = Doc3#doc_info.revs,
-%     ?assertEqual(Rev1, Revs3#rev_info.rev),
+    {ok, _} = couch_replicator:replicate(RepObject2, ?ADMIN_USER),
+    {ok, Doc3} = cpse_util:open_doc(Source, foo),
+    [Revs3] = Doc3#doc_info.revs,
+    ?assertEqual(Rev1, Revs3#rev_info.rev),
 
-%     cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
-%         {doc_count, 1},
-%         {del_doc_count, 0},
-%         {update_seq, 3},
-%         {changes, 1},
-%         {purge_seq, 1},
-%         {purge_infos, PurgeInfos}
-%     ]).
+    cpse_util:assert_db_props(?MODULE, ?LINE, Source, [
+        {doc_count, 1},
+        {del_doc_count, 0},
+        {update_seq, 3},
+        {changes, 1},
+        {purge_seq, 1},
+        {purge_infos, PurgeInfos}
+    ]).
 
 
 cpse_purge_internal_repl_disabled({Source, Target}) ->
