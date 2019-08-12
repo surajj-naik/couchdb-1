@@ -41,6 +41,12 @@
 -define(ST_CRASHING, <<"crashing">>).
 -define(ST_TRIGGERED, <<"triggered">>).
 
+% Some fields from a rep object
+-define(REP_ID, <<"id">>).
+-define(DB_NAME, <<"db_name">>).
+-define(DOC_ID, <<"doc_id">>).
+-define(START_TIME, <<"start_time">>).
+
 % Fields couch job data objects
 -define(REP, <<"rep">>).
 -define(REP_PARSE_ERROR, <<"rep_parse_error">>).
@@ -51,6 +57,8 @@
 -define(DOC_ID, <<"doc_id">>).
 -define(ERROR_COUNT, <<"error_count">>).
 -define(LAST_UPDATED, <<"last_updated">>).
+-define(HISTORY, <<"history">>).
+-define(VER, <<"ver">>).
 
 % Accepted job message tag
 -define(ACCEPTED_JOB, accepted_job).

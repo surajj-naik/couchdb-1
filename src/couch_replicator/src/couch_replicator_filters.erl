@@ -27,17 +27,17 @@
 % For `user` filter, i.e. filters specified as user code
 % in source database, this code doesn't fetch the filter
 % code, but only returns the name of the filter.
--spec parse([_]) ->
+-spec parse(#{}) ->
     {ok, nil} |
     {ok, {view, binary(), {[_]}}} |
     {ok, {user, {binary(), binary()}, {[_]}}} |
     {ok, {docids, [_]}} |
     {ok, {mango, {[_]}}} |
     {error, binary()}.
-parse(Options) ->
-    Filter = couch_util:get_value(filter, Options),
-    DocIds = couch_util:get_value(doc_ids, Options),
-    Selector = couch_util:get_value(selector, Options),
+parse(#{} = Options) ->
+    Filter = maps:get(<<"filter">>, Options, undefined),
+    DocIds = maps:get(<<"doc_ids">>, Options, undefined),
+    Selector = maps:get(<<"selector">>, Options, undefined),
     case {Filter, DocIds, Selector} of
         {undefined, undefined, undefined} ->
             {ok, nil};

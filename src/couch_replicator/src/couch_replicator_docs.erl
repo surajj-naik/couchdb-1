@@ -27,7 +27,7 @@
     update_failed/3,
     update_rep_id/1,
     update_triggered/3,
-    update_error/2
+    update_error/4
 ]).
 
 
@@ -116,13 +116,8 @@ update_triggered(Id, DocId, DbName) ->
     ok.
 
 
--spec update_error(#{}, any()) -> ok.
-update_error(#rep{} = Rep, Error) ->
-    #{
-        <<"id">> := RepId0,
-        <<"db_name">> := DbName,
-        <<"doc_id">> := DocId,
-    } = Rep,
+-spec update_error(binary(), binary(), binary(), any()) -> ok.
+update_error(RepId0, DbName, DocId, Error) ->
     Reason = error_reason(Error),
     RepId = case RepId0 of
         Id when is_binary(Id) -> Id;
@@ -199,22 +194,30 @@ parse_rep_doc_without_id(#{} = Doc, UserName) ->
             {error, Error} -> throw({bad_request, Error});
             Result -> Result
         end,
+        FilterType = couch_replicator_filters:parse(Options) of
+            {ok, nil} -> null;
+            {ok, {user, _FName, _QP}} -> <<"user">>;
+            {ok, {view, _FName, _QP}} -> <<"view">>;
+            {ok, {docids, _DocIds}} -> <<"doc_ids">>;
+            {ok, {mango, _Selector}} -> <<"mango">>;
+            {error, FilterError} -> throw({error, FilterError})
+        end,
         Rep = #{
-            <<"id">> => null,
+            ?REP_ID => null,
             <<"base_id">> => null,
-            <<"source">> => Source,
-            <<"target">> => Target,
+            ?SOURCE => Source,
+            ?TARGET => Target,
             <<"options">> => Opts,
             <<"user">> => UserName,
+            <<"filter_type">> => FilterType,
             <<"type">> => Type,
             <<"view">> => View,
-            <<"doc_id">> => maps:get(<<"_id">>, Doc, null)
+            ?DOC_ID => maps:get(<<"_id">>, Doc, null),
+            ?DB_NAME => null,
+            ?DOC_STATE => null,
+            ?START_TIME => erlang:system_time(),
+            ?VER => fabric2_util:uuid()
         },
-        % Check if can parse filter code, if not throw exception
-        case couch_replicator_filters:parse(Opts) of
-            {error, FilterError} -> throw({error, FilterError});
-            {ok, _Filter} -> ok
-        end,
         {ok, Rep}
     end.
 
