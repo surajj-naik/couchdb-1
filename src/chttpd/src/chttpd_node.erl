@@ -162,17 +162,9 @@ handle_node_req(Req) ->
 
 
 % Unclustered system db or shard requests
-handle_node_db_req(#httpd{method=Method,
-                          path_parts=[DbName|RestParts],
-                          user_ctx=Ctx}=Req,
-                   Node) ->
-    chttpd:verify_is_server_admin(Req),
-    %DbsDbName = config:get("mem3", "shards_db", "_dbs"),
-    %NodesDbName = config:get("mem3", "nodes_db", "_nodes"),
-    case {Method, DbName, RestParts} of
-    {'GET', DbName, []} ->
-        case call_node(Node, chttpd_node, do_db_req,
-                  [Ctx, DbName, couch_db, get_db_info]) of
+handle_node_db_req(#httpd{method='GET', path_parts=[DbName]}=Req, Node) ->
+    case call_node(Node, chttpd_node, do_db_req,
+        [Req#httpd.user_ctx, DbName, couch_db, get_db_info]) of
         {ok, DbInfo} ->
             send_json(Req, {DbInfo});
         {error, {_, _}=Error} ->
@@ -180,19 +172,21 @@ handle_node_db_req(#httpd{method=Method,
         {_, _}=Error ->
             send_error(Req, Error)
         end;
-    {_, DbName, []} ->
-        send_method_not_allowed(Req, "GET");
-    %{'GET', DbName, [<<"_all_docs">>]} ->
-    %    ...
-    %{'POST', DbName, [<<"_compact">>]} ->
-    %    ...
-    %{_, DbName, [DocName]} ->
-    %    %only support doc CRUD in _dbs/_nodes, and _info endpoint on all
-    %{'GET', DbName, [<<"_design">>, DDoc, <<"_info">>]} ->
-    %    %individual view shard info stats
-    {_, _, _} ->
-        send_error(Req, {bad_request, <<"invalid _node request">>})
-    end.
+
+handle_node_db_req(#httpd{path_parts=[_DbName]}=Req, _Node) ->
+    send_method_not_allowed(Req, "GET");
+
+%{'GET', DbName, [<<"_all_docs">>]} ->
+%    ...
+%{'POST', DbName, [<<"_compact">>]} ->
+%    ...
+%{_, DbName, [DocName]} ->
+%    %only support doc CRUD in _dbs/_nodes, and _info endpoint on all
+%{'GET', DbName, [<<"_design">>, DDoc, <<"_info">>]} ->
+%    %individual view shard info stats
+
+handle_node_db_req(Req, _Node) ->
+    send_error(Req, {bad_request, <<"invalid _node request">>}).
 
 % below adapted from old couch_httpd_db
 % all of these run on the requested node
