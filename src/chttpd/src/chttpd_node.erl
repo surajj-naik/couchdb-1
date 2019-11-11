@@ -13,10 +13,19 @@
 -module(chttpd_node).
 -compile(tuple_calls).
 
+%% Public API
 -export([
-    handle_node_req/1,
+    handle_node_req/1
+]).
+
+%% for inter-node calls
+-export([
     do_db_req/4,
-    get_stats/0
+    do_db_req/5,
+    get_stats/0,
+    compact_view/2,
+    design_doc_info/2,
+    view_info/3
 ]).
 
 -include_lib("couch/include/couch_db.hrl").
@@ -176,14 +185,63 @@ handle_node_db_req(#httpd{method='GET', path_parts=[DbName]}=Req, Node) ->
 handle_node_db_req(#httpd{path_parts=[_DbName]}=Req, _Node) ->
     send_method_not_allowed(Req, "GET");
 
-%{'GET', DbName, [<<"_all_docs">>]} ->
-%    ...
-%{'POST', DbName, [<<"_compact">>]} ->
-%    ...
-%{_, DbName, [DocName]} ->
-%    %only support doc CRUD in _dbs/_nodes, and _info endpoint on all
-%{'GET', DbName, [<<"_design">>, DDoc, <<"_info">>]} ->
-%    %individual view shard info stats
+handle_node_db_req(#httpd{path_parts=[_DbName, <<"_all_docs">>]}=Req, _Node) ->
+    send_json(Req, 200, {[]});
+
+handle_node_db_req(#httpd{method='POST', path_parts=[DbName, <<"_compact">>]}=Req, Node) ->
+    chttpd:validate_ctype(Req, "application/json"),
+    case call_node(Node, chttpd_node, do_db_req,
+        [Req#httpd.user_ctx, DbName, couch_db, start_compact]) of
+        {ok, _} ->
+            send_json(Req, 202, {[{ok, true}]});
+        {not_found, _} ->
+            send_error(Req, not_found)
+    end;
+
+handle_node_db_req(#httpd{method='POST', path_parts=[DbName, <<"_compact">>, DesignName]}=Req, Node) ->
+    chttpd:validate_ctype(Req, "application/json"),
+    DesignId = <<"_design/", DesignName/binary>>,
+    case call_node(Node, chttpd_node, do_db_req,
+        [Req#httpd.user_ctx, DbName, chttpd_node, compact_view, [DesignId]]) of
+        ok ->
+            send_json(Req, 202, {[{ok, true}]});
+        {not_found, _} ->
+            send_error(Req, not_found)
+    end;
+
+handle_node_db_req(#httpd{path_parts=[_DbName, <<"_", _/binary>> = EP]}=Req, _Node) ->
+    send_error(Req, {forbidden, <<EP/binary, " endpoint is not permitted.">>});
+
+handle_node_db_req(#httpd{path_parts=[<<"shards/", _/binary>>, _DocID]}=Req, _Node) ->
+    send_error(Req, {forbidden, <<"Document CRUD not permitted within shards.">>});
+
+handle_node_db_req(#httpd{path_parts=[_DbName, DocID]}=Req, _Node) ->
+    send_json(Req, 200, {[]});
+
+handle_node_db_req(#httpd{path_parts=[_DbName, <<"_design">>, DDocID]}=Req, _Node) ->
+    send_json(Req, 200, {[]});
+
+handle_node_db_req(#httpd{method='GET',
+  path_parts=[DbName, <<"_design">>, DesignName, <<"_info">>]}=Req, Node) ->
+    DesignId = <<"_design/", DesignName/binary>>,
+    case call_node(Node, chttpd_node, do_db_req,
+        [Req#httpd.user_ctx, DbName, chttpd_node, design_doc_info, [DesignId]]) of
+        {ok, Info} ->
+            send_json(Req, 200, {Info});
+        {not_found, _} ->
+            send_error(Req, not_found)
+    end;
+
+handle_node_db_req(#httpd{method='GET',
+  path_parts=[DbName, <<"_design">>, DesignName, <<"_view">>, VName, <<"_info">>]}=Req, Node) ->
+    DesignId = <<"_design/", DesignName/binary>>,
+    case call_node(Node, chttpd_node, do_db_req,
+        [Req#httpd.user_ctx, DbName, chttpd_node, view_info, [DesignId, VName]]) of
+        {ok, Info} ->
+            send_json(Req, 200, {Info});
+        {not_found, _} ->
+            send_error(Req, not_found)
+    end;
 
 handle_node_db_req(Req, _Node) ->
     send_error(Req, {bad_request, <<"invalid _node request">>}).
@@ -191,10 +249,13 @@ handle_node_db_req(Req, _Node) ->
 % below adapted from old couch_httpd_db
 % all of these run on the requested node
 do_db_req(Ctx, DbName, Mod, Fun) ->
+    do_db_req(Ctx, DbName, Mod, Fun, []).
+
+do_db_req(Ctx, DbName, Mod, Fun, Args) ->
     case couch_db:open(DbName, [{user_ctx, Ctx}]) of
     {ok, Db} ->
         try
-            erlang:apply(Mod, Fun, [Db])
+            erlang:apply(Mod, Fun, [Db | Args])
         after
             catch couch_db:close(Db)
         end;
@@ -220,6 +281,27 @@ call_node(Node, Mod, Fun, Args) when is_atom(Node) ->
         Else ->
             Else
     end.
+
+compact_view(Db, DesignId) ->
+    DDoc = couch_httpd_db:couch_doc_open(
+        Db, DesignId, nil, [ejson_body]),
+    couch_mrview:compact(Db, DDoc).
+
+
+design_doc_info(Db, DesignId) ->
+    DDoc = couch_httpd_db:couch_doc_open(
+        Db, DesignId, nil, [ejson_body]),
+    fabric:get_view_group_info(Db, DDoc).
+
+
+view_info(Db, DDocId, VName) ->
+    DbName = couch_db:name(Db),
+    {ok, Info} = couch_mrview:get_view_info(DbName, DDocId, VName),
+    FinalInfo = [{db_name, DbName},
+                 {ddoc, DDocId},
+                 {view, VName} | Info],
+    {ok, FinalInfo}.
+
 
 flush(Node, Req) ->
     case couch_util:get_value("flush", chttpd:qs(Req)) of
