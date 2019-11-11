@@ -11,6 +11,7 @@
 % the License.
 
 -module(chttpd_node).
+-compile(tuple_calls).
 
 -export([
     handle_node_req/1,
