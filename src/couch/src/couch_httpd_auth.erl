@@ -333,7 +333,7 @@ handle_session_req(#httpd{method='POST', mochi_req=MochiReq}=Req, AuthModule) ->
     end,
     case authenticate(Password, UserProps) of
         true ->
-            verify_totp(UserProps, Form),
+            verify_totp(UserProps, couch_util:get_value("token", Form, "")),
             % setup the session cookie
             Secret = ?l2b(ensure_cookie_auth_secret()),
             UserSalt = couch_util:get_value(<<"salt">>, UserProps),
@@ -501,7 +501,9 @@ reject_if_totp(User) ->
             throw({unauthorized, <<"Name or password is incorrect.">>})
     end.
 
-verify_totp(User, Form) ->
+verify_totp(User, Token) when is_list(Token) ->
+    verify_totp(User, ?l2b(Token));
+verify_totp(User, Token) when is_binary(Token) ->
     case get_totp_config(User) of
         undefined ->
             ok;
@@ -510,7 +512,6 @@ verify_totp(User, Form) ->
             Alg = couch_util:to_existing_atom(
                 couch_util:get_value(<<"algorithm">>, Props, <<"sha">>)),
             Len = couch_util:get_value(<<"length">>, Props, 6),
-            Token = ?l2b(couch_util:get_value("token", Form, "")),
             verify_token(Alg, Key, Len, Token)
     end.
 
