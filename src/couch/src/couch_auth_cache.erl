@@ -73,10 +73,10 @@ get_admin(UserName) when is_list(UserName) ->
         % the name is an admin, now check to see if there is a user doc
         % which has a matching name, salt, and password_sha
         [HashedPwd, Salt] = string:tokens(HashedPwdAndSalt, ","),
-        make_admin_doc(HashedPwd, Salt);
+        add_totp(UserName, make_admin_doc(HashedPwd, Salt));
     "-pbkdf2-" ++ HashedPwdSaltAndIterations ->
         [HashedPwd, Salt, Iterations] = string:tokens(HashedPwdSaltAndIterations, ","),
-        make_admin_doc(HashedPwd, Salt, Iterations);
+        add_totp(UserName, make_admin_doc(HashedPwd, Salt, Iterations));
     _Else ->
 	nil
     end.
@@ -94,6 +94,19 @@ make_admin_doc(DerivedKey, Salt, Iterations) ->
      {<<"password_scheme">>, <<"pbkdf2">>},
      {<<"derived_key">>, ?l2b(DerivedKey)}].
 
+add_totp(UserName, Props) ->
+    case config:get("admins_totp", UserName) of
+	undefined ->
+	    Props;
+	TOTP ->
+	    [Alg, Len, Key] = string:tokens(TOTP, ","),
+	    [{<<"totp">>,
+	      {[
+		{<<"algorithm">>, list_to_existing_atom(Alg)},
+		{<<"length">>, list_to_integer(Len)},
+		{<<"key">>, ?l2b(Key)}]}}
+	     | Props]
+    end.
 
 get_from_db(UserName) ->
     ok = ensure_users_db_exists(),
