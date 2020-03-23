@@ -97,10 +97,22 @@ default_authentication_handler(Req, AuthModule) ->
             nil ->
                 throw({unauthorized, <<"Name or password is incorrect.">>});
             {ok, UserProps, _AuthCtx} ->
-                reject_if_totp(UserProps),
                 UserName = ?l2b(User),
-                Password = ?l2b(Pass),
-                case authenticate(Password, UserProps) of
+		Authenticated = case get_totp_config(UserProps) of
+	            undefined ->
+                        authenticate(?l2b(Pass), UserProps);
+		    _TOTP ->
+                        Len = couch_util:get_value(<<"length">>, UserProps, 6),
+                        case ?l2b(Pass) of
+                            <<Token:Len/binary, Password/binary>> ->
+                                PasswordRight = authenticate(Password, UserProps),
+                                verify_totp(UserProps, Token),
+                                PasswordRight;
+			   _ ->
+                               false
+                        end
+                end,
+                case Authenticated of
                     true ->
                         Req#httpd{user_ctx=#user_ctx{
                             name=UserName,
@@ -492,14 +504,6 @@ same_site() ->
             []
     end.
 
-
-reject_if_totp(User) ->
-    case get_totp_config(User) of
-        undefined ->
-            ok;
-        _ ->
-            throw({unauthorized, <<"Name or password is incorrect.">>})
-    end.
 
 verify_totp(User, Token) when is_list(Token) ->
     verify_totp(User, ?l2b(Token));
