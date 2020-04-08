@@ -406,12 +406,16 @@ get_info(#{} = Db) ->
         tx := Tx,
         db_prefix := DbPrefix
     } = ensure_current(Db),
-    get_info_wait(get_info_future(Tx, DbPrefix)).
+    get_info_wait(get_info_future(Db, Tx, DbPrefix)).
 
 
+%% Needs more thought.
 get_info_future(Tx, DbPrefix) ->
+    get_info_future(will_crash, Tx, DbPrefix).
+
+get_info_future(Db, Tx, DbPrefix) ->
     {CStart, CEnd} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
-    ChangesFuture = erlfdb:get_range(Tx, CStart, CEnd, [
+    ChangesFuture = aegis:get_range(Db, Tx, CStart, CEnd, [
         {streaming_mode, exact},
         {limit, 1},
         {reverse, true}
@@ -538,12 +542,12 @@ get_all_revs(#{} = Db, DocId) ->
 
         Prefix = erlfdb_tuple:pack({?DB_REVS, DocId}, DbPrefix),
         Options = [{streaming_mode, want_all}],
-        Future = erlfdb:get_range_startswith(Tx, Prefix, Options),
+        Future = aegis:get_range_startswith(Db, Tx, Prefix, Options),
         lists:map(fun({K, V}) ->
             Key = erlfdb_tuple:unpack(K, DbPrefix),
             Val = erlfdb_tuple:unpack(V),
             fdb_to_revinfo(Key, Val)
-        end, erlfdb:wait(Future))
+        end, aegis:wait(Future))
     end).
 
 
@@ -563,7 +567,7 @@ get_winning_revs_future(#{} = Db, DocId, NumRevs) ->
 
     {StartKey, EndKey} = erlfdb_tuple:range({?DB_REVS, DocId}, DbPrefix),
     Options = [{reverse, true}, {limit, NumRevs}],
-    erlfdb:fold_range_future(Tx, StartKey, EndKey, Options).
+    aegis:fold_range_future(Db, Tx, StartKey, EndKey, Options).
 
 
 get_winning_revs_wait(#{} = Db, RangeFuture) ->
@@ -571,7 +575,7 @@ get_winning_revs_wait(#{} = Db, RangeFuture) ->
         tx := Tx,
         db_prefix := DbPrefix
     } = ensure_current(Db),
-    RevRows = erlfdb:fold_range_wait(Tx, RangeFuture, fun({K, V}, Acc) ->
+    RevRows = aegis:fold_range_wait(Tx, RangeFuture, fun({K, V}, Acc) ->
         Key = erlfdb_tuple:unpack(K, DbPrefix),
         Val = erlfdb_tuple:unpack(V),
         [fdb_to_revinfo(Key, Val) | Acc]
@@ -589,7 +593,7 @@ get_non_deleted_rev(#{} = Db, DocId, RevId) ->
 
     BaseKey = {?DB_REVS, DocId, true, RevPos, Rev},
     Key = erlfdb_tuple:pack(BaseKey, DbPrefix),
-    case erlfdb:wait(erlfdb:get(Tx, Key)) of
+    case aegis:wait(aegis:get(Db, Tx, Key)) of
         not_found ->
             not_found;
         Val ->
@@ -630,7 +634,7 @@ get_doc_body_wait(#{} = Db0, DocId, RevInfo, Future) ->
         rev_path := RevPath
     } = RevInfo,
 
-    RevBodyRows = erlfdb:fold_range_wait(Tx, Future, fun({_K, V}, Acc) ->
+    RevBodyRows = aegis:fold_range_wait(Tx, Future, fun({_K, V}, Acc) ->
         [V | Acc]
     end, []),
     BodyRows = lists:reverse(RevBodyRows),
@@ -645,11 +649,11 @@ get_local_doc(#{} = Db0, <<?LOCAL_DOC_PREFIX, _/binary>> = DocId) ->
     } = Db = ensure_current(Db0),
 
     Key = erlfdb_tuple:pack({?DB_LOCAL_DOCS, DocId}, DbPrefix),
-    Rev = erlfdb:wait(erlfdb:get(Tx, Key)),
+    Rev = aegis:wait(aegis:get(Db, Tx, Key)),
 
     Prefix = erlfdb_tuple:pack({?DB_LOCAL_DOC_BODIES, DocId}, DbPrefix),
-    Future = erlfdb:get_range_startswith(Tx, Prefix),
-    Chunks = lists:map(fun({_K, V}) -> V end, erlfdb:wait(Future)),
+    Future = aegis:get_range_startswith(Db, Tx, Prefix),
+    Chunks = lists:map(fun({_K, V}) -> V end, aegis:wait(Future)),
 
     fdb_to_local_doc(Db, DocId, Rev, Chunks).
 
@@ -742,7 +746,7 @@ write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
     lists:foreach(fun(RI0) ->
         RI = RI0#{winner := false},
         {K, V, undefined} = revinfo_to_fdb(Tx, DbPrefix, DocId, RI),
-        ok = erlfdb:set(Tx, K, V)
+        ok = aegis:set(Db, Tx, K, V)
     end, ToUpdate),
 
     lists:foreach(fun(RI0) ->
@@ -780,7 +784,7 @@ write_doc(#{} = Db0, Doc, NewWinner0, OldWinner, ToUpdate, ToRemove) ->
         _ ->
             ADKey = erlfdb_tuple:pack({?DB_ALL_DOCS, DocId}, DbPrefix),
             ADVal = erlfdb_tuple:pack(NewRevId),
-            ok = erlfdb:set(Tx, ADKey, ADVal)
+            ok = aegis:set(Db, Tx, ADKey, ADVal)
     end,
 
     % _changes
@@ -855,7 +859,7 @@ write_local_doc(#{} = Db0, Doc) ->
 
     {LDocKey, LDocVal, NewSize, Rows} = local_doc_to_fdb(Db, Doc),
 
-    {WasDeleted, PrevSize} = case erlfdb:wait(erlfdb:get(Tx, LDocKey)) of
+    {WasDeleted, PrevSize} = case aegis:wait(aegis:get(Db, Tx, LDocKey)) of
         <<255, RevBin/binary>> ->
             case erlfdb_tuple:unpack(RevBin) of
                 {?CURR_LDOC_FORMAT, _Rev, Size} ->
@@ -874,11 +878,11 @@ write_local_doc(#{} = Db0, Doc) ->
             erlfdb:clear(Tx, LDocKey),
             erlfdb:clear_range_startswith(Tx, BPrefix);
         false ->
-            erlfdb:set(Tx, LDocKey, LDocVal),
+            aegis:set(Db, Tx, LDocKey, LDocVal),
             % Make sure to clear the whole range, in case there was a larger
             % document body there before.
             erlfdb:clear_range_startswith(Tx, BPrefix),
-            lists:foreach(fun({K, V}) -> erlfdb:set(Tx, K, V) end, Rows)
+            lists:foreach(fun({K, V}) -> aegis:set(Db, Tx, K, V) end, Rows)
     end,
 
     case {WasDeleted, Doc#doc.deleted} of
@@ -902,7 +906,7 @@ read_attachment(#{} = Db, DocId, AttId) ->
     } = ensure_current(Db),
 
     AttKey = erlfdb_tuple:pack({?DB_ATTS, DocId, AttId}, DbPrefix),
-    case erlfdb:wait(erlfdb:get_range_startswith(Tx, AttKey)) of
+    case aegis:wait(aegis:get_range_startswith(Db, Tx, AttKey)) of
         not_found ->
             throw({not_found, missing});
         KVs ->
@@ -921,11 +925,11 @@ write_attachment(#{} = Db, DocId, Data) when is_binary(Data) ->
     Chunks = chunkify_binary(Data),
 
     IdKey = erlfdb_tuple:pack({?DB_ATT_NAMES, DocId, AttId}, DbPrefix),
-    ok = erlfdb:set(Tx, IdKey, <<>>),
+    ok = aegis:set(Db, Tx, IdKey, <<>>),
 
     lists:foldl(fun(Chunk, ChunkId) ->
         AttKey = erlfdb_tuple:pack({?DB_ATTS, DocId, AttId, ChunkId}, DbPrefix),
-        ok = erlfdb:set(Tx, AttKey, Chunk),
+        ok = aegis:set(Db, Tx, AttKey, Chunk),
         ChunkId + 1
     end, 0, Chunks),
     {ok, AttId}.
@@ -939,7 +943,7 @@ get_last_change(#{} = Db) ->
 
     {Start, End} = erlfdb_tuple:range({?DB_CHANGES}, DbPrefix),
     Options = [{limit, 1}, {reverse, true}],
-    case erlfdb:get_range(Tx, Start, End, Options) of
+    case aegis:get_range(Db, Tx, Start, End, Options) of
         [] ->
             vs_to_seq(fabric2_util:seq_zero_vs());
         [{K, _V}] ->
@@ -960,14 +964,14 @@ fold_range(TxOrDb, RangePrefix, UserFun, UserAcc, Options) ->
     case fabric2_util:get_value(limit, Options) of 0 -> UserAcc; _ ->
         FAcc = get_fold_acc(Db, RangePrefix, UserFun, UserAcc, Options),
         try
-            fold_range(Tx, FAcc)
+            fold_range(Db, Tx, FAcc)
         after
             erase(?PDICT_FOLD_ACC_STATE)
         end
     end.
 
 
-fold_range(Tx, FAcc) ->
+fold_range(#{} = Db, Tx, FAcc) ->
     #fold_acc{
         start_key = Start,
         end_key = End,
@@ -983,14 +987,14 @@ fold_range(Tx, FAcc) ->
     try
         #fold_acc{
             user_acc = FinalUserAcc
-        } = erlfdb:fold_range(Tx, Start, End, Callback, FAcc, Opts),
+        } = aegis:fold_range(Db, Tx, Start, End, Callback, FAcc, Opts),
         FinalUserAcc
     catch error:{erlfdb_error, ?TRANSACTION_TOO_OLD} when DoRestart ->
         % Possibly handle cluster_version_changed and future_version as well to
         % continue iteration instead fallback to transactional and retrying
         % from the beginning which is bound to fail when streaming data out to a
         % socket.
-        fold_range(Tx, restart_fold(Tx, FAcc))
+        fold_range(Db, Tx, restart_fold(Tx, FAcc))
     end.
 
 
@@ -1193,7 +1197,7 @@ write_doc_body(#{} = Db0, #doc{} = Doc) ->
 
     Rows = doc_to_fdb(Db, Doc),
     lists:foreach(fun({Key, Value}) ->
-        ok = erlfdb:set(Tx, Key, Value)
+        ok = aegis:set(Db, Tx, Key, Value)
     end, Rows).
 
 
@@ -1246,12 +1250,12 @@ cleanup_attachments(Db, DocId, NewDoc, ToRemove) ->
 
     AttPrefix = erlfdb_tuple:pack({?DB_ATT_NAMES, DocId}, DbPrefix),
     Options = [{streaming_mode, want_all}],
-    Future = erlfdb:get_range_startswith(Tx, AttPrefix, Options),
+    Future = aegis:get_range_startswith(Db, Tx, AttPrefix, Options),
 
     ExistingIdSet = lists:foldl(fun({K, _}, Acc) ->
         {?DB_ATT_NAMES, DocId, AttId} = erlfdb_tuple:unpack(K, DbPrefix),
         sets:add_element(AttId, Acc)
-    end, sets:new(), erlfdb:wait(Future)),
+    end, sets:new(), aegis:wait(Future)),
 
     AttsToRemove = sets:subtract(ExistingIdSet, ActiveIdSet),
 
