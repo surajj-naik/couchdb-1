@@ -549,9 +549,18 @@ split_child(Tx, #tree{} = Tree, #node{} = Parent0, #node{} = Child) ->
                 umerge_members(Tree, Parent0#node.level, [{FirstRightKey, LastRightKey, RightId, RightReduction}],
                     lists:keydelete(Child#node.id, 3, Parent0#node.members)))
     },
+    Parent2 =
+        if Parent1#node.id == ?NODE_ROOT_ID ->
+            Parent1;
+        Parent0#node.members == Parent1#node.members ->
+            Parent1;
+        true ->
+            clear_node(Tx, Tree, Parent1),
+            Parent1#node{id = new_node_id(Tx, Tree)}
+    end,
     clear_node(Tx, Tree, Child),
-    set_nodes(Tx, Tree, [LeftChild, RightChild, Parent1]),
-    {Parent1, LeftChild, RightChild}.
+    set_nodes(Tx, Tree, [LeftChild, RightChild, Parent2]),
+    {Parent2, LeftChild, RightChild}.
 
 
 update_prev_neighbour(_Tx, #tree{} = _Tree, #node{prev = undefined} = _Node) ->
@@ -575,7 +584,7 @@ insert_nonfull(Tx, #tree{} = Tree, #node{level = 0} = Node0, Key, Value) ->
         members = umerge_members(Tree, 0, [{Key, Value}], Node0#node.members)
     },
     set_node(Tx, Tree, Node0, Node1),
-    reduce_node(Tree, Node1);
+    {Node1#node.id, reduce_node(Tree, Node1)};
 
 insert_nonfull(Tx, #tree{} = Tree, #node{} = Node0, Key, Value) ->
     ChildId0 = find_child_id(Tree, Node0, Key),
@@ -595,16 +604,25 @@ insert_nonfull(Tx, #tree{} = Tree, #node{} = Node0, Key, Value) ->
             {Node0, Child0}
     end,
     ChildId1 = Child1#node.id,
-    NewReduction = insert_nonfull(Tx, Tree, Child1, Key, Value),
+    {ChildId2, NewReduction} = insert_nonfull(Tx, Tree, Child1, Key, Value),
     {CurrentFirstKey, CurrentLastKey, ChildId1, _OldReduction} = lists:keyfind(ChildId1, 3, Node1#node.members),
     [NewFirstKey, _] = sort_keys(Tree, [Key, CurrentFirstKey]),
     [_, NewLastKey] = sort_keys(Tree, [Key, CurrentLastKey]),
     Node2 = Node1#node{
         members = lists:keyreplace(ChildId1, 3, Node1#node.members,
-            {NewFirstKey, NewLastKey, ChildId1, NewReduction})
+            {NewFirstKey, NewLastKey, ChildId2, NewReduction})
     },
-    set_node(Tx, Tree, Node0, Node2),
-    reduce_node(Tree, Node2).
+    Node3 = if
+        Node2#node.id == ?NODE_ROOT_ID ->
+            Node2;
+        Node0#node.members == Node2#node.members ->
+            Node2;
+        true ->
+            clear_node(Tx, Tree, Node2),
+            Node2#node{id = new_node_id(Tx, Tree)}
+    end,
+    set_node(Tx, Tree, Node0, Node3),
+    {Node3#node.id, reduce_node(Tree, Node3)}.
 
 
 %% @doc Deletes an entry from the ebtree
