@@ -549,15 +549,7 @@ split_child(Tx, #tree{} = Tree, #node{} = Parent0, #node{} = Child) ->
                 umerge_members(Tree, Parent0#node.level, [{FirstRightKey, LastRightKey, RightId, RightReduction}],
                     lists:keydelete(Child#node.id, 3, Parent0#node.members)))
     },
-    Parent2 =
-        if Parent1#node.id == ?NODE_ROOT_ID ->
-            Parent1;
-        Parent0#node.members == Parent1#node.members ->
-            Parent1;
-        true ->
-            clear_node(Tx, Tree, Parent1),
-            Parent1#node{id = new_node_id(Tx, Tree)}
-    end,
+    Parent2 = new_node_id_if_cacheable(Tx, Tree, Parent0, Parent1),
     clear_node(Tx, Tree, Child),
     set_nodes(Tx, Tree, [LeftChild, RightChild, Parent2]),
     {Parent2, LeftChild, RightChild}.
@@ -612,15 +604,7 @@ insert_nonfull(Tx, #tree{} = Tree, #node{} = Node0, Key, Value) ->
         members = lists:keyreplace(ChildId1, 3, Node1#node.members,
             {NewFirstKey, NewLastKey, ChildId2, NewReduction})
     },
-    Node3 = if
-        Node2#node.id == ?NODE_ROOT_ID ->
-            Node2;
-        Node0#node.members == Node2#node.members ->
-            Node2;
-        true ->
-            clear_node(Tx, Tree, Node2),
-            Node2#node{id = new_node_id(Tx, Tree)}
-    end,
+    Node3 = new_node_id_if_cacheable(Tx, Tree, Node0, Node2),
     set_node(Tx, Tree, Node0, Node3),
     {Node3#node.id, reduce_node(Tree, Node3)}.
 
@@ -686,16 +670,7 @@ delete(Tx, #tree{} = Tree, #node{} = Parent0, Key) ->
             Parent1 = Parent0#node{
                 members = Members3
             },
-            Parent2 = if
-                Parent1#node.id == ?NODE_ROOT_ID ->
-                    Parent1;
-                Parent0#node.members == Parent1#node.members ->
-                    Parent1;
-                true ->
-                    clear_node(Tx, Tree, Parent1),
-                    Parent1#node{id = new_node_id(Tx, Tree)}
-            end,
-
+            Parent2 = new_node_id_if_cacheable(Tx, Tree, Parent0, Parent1),
             clear_nodes(Tx, Tree, [Child0, Sibling]),
             set_nodes(Tx, Tree, NewNodes),
             Parent2;
@@ -706,16 +681,7 @@ delete(Tx, #tree{} = Tree, #node{} = Parent0, Key) ->
                 members = lists:keyreplace(ChildId0, 3, Parent0#node.members,
                     {first_key(Child1), last_key(Child1), Child1#node.id, reduce_node(Tree, Child1)})
             },
-            Parent2 = if
-                Parent1#node.id == ?NODE_ROOT_ID ->
-                    Parent1;
-                Parent0#node.members == Parent1#node.members ->
-                    Parent1;
-                true ->
-                    clear_node(Tx, Tree, Parent1),
-                    Parent1#node{id = new_node_id(Tx, Tree)}
-            end,
-            Parent2
+            new_node_id_if_cacheable(Tx, Tree, Parent0, Parent1)
     end.
 
 
@@ -1088,6 +1054,28 @@ last_key(Members) when is_list(Members) ->
         {_F, L, _P, _R} ->
             L
     end.
+
+
+new_node_id_if_cacheable(Tx, #tree{} = Tree, #node{} = Old, #node{} = New) ->
+    MembersChanged = Old#node.members /= New#node.members,
+    NodeIsCacheable = node_is_cacheable(New),
+    if
+        MembersChanged andalso NodeIsCacheable ->
+            clear_node(Tx, Tree, New),
+            New#node{id = new_node_id(Tx, Tree)};
+        true ->
+            New
+    end.
+
+
+node_is_cacheable(#node{id = ?NODE_ROOT_ID}) ->
+    false;
+
+node_is_cacheable(#node{level = 0}) ->
+    false;
+
+node_is_cacheable(#node{}) ->
+    true.
 
 
 new_node_id(Tx, Tree) ->
