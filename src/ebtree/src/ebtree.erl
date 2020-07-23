@@ -53,10 +53,9 @@
 
 -define(META, 0).
 -define(META_ORDER, 0).
--define(META_NEXT_ID, 1).
 
 -define(NODE, 1).
--define(NODE_ROOT_ID, 0).
+-define(NODE_ROOT_ID, <<0>>).
 
 -define(underflow(Tree, Node), Tree#tree.min > length(Node#node.members)).
 -define(at_min(Tree, Node), Tree#tree.min == length(Node#node.members)).
@@ -102,7 +101,6 @@ open(Db, Prefix, Order, Options) when is_binary(Prefix), is_integer(Order), Orde
             not_found ->
                 erlfdb:clear_range_startswith(Tx, Prefix),
                 set_meta(Tx, Tree, ?META_ORDER, Order),
-                set_meta(Tx, Tree, ?META_NEXT_ID, 1),
                 set_node(Tx, Tree, #node{id = ?NODE_ROOT_ID}),
                 init_order(Tree, Order);
             ActualOrder when is_integer(ActualOrder) ->
@@ -495,7 +493,7 @@ insert(Db, #tree{} = Tree, Key, Value) ->
         Root0 = get_node(Tx, Tree, ?NODE_ROOT_ID),
         case ?is_full(Tree, Root0) of
             true ->
-                OldRoot = Root0#node{id = new_node_id(Tx, Tree)},
+                OldRoot = Root0#node{id = new_node_id()},
                 FirstKey = first_key(OldRoot),
                 LastKey = last_key(OldRoot),
                 Root1 = #node{
@@ -514,8 +512,8 @@ insert(Db, #tree{} = Tree, Key, Value) ->
 split_child(Tx, #tree{} = Tree, #node{} = Parent0, #node{} = Child) ->
     {LeftMembers, RightMembers} = lists:split(Tree#tree.min, Child#node.members),
 
-    LeftId = new_node_id(Tx, Tree),
-    RightId = new_node_id(Tx, Tree),
+    LeftId = new_node_id(),
+    RightId = new_node_id(),
 
     LeftChild = remove_pointers_if_not_leaf(#node{
         id = LeftId,
@@ -650,12 +648,12 @@ delete(Tx, #tree{} = Tree, #node{} = Parent0, Key) ->
             Sibling = get_node(Tx, Tree, SiblingId),
             NewNodes = case ?at_min(Tree, Sibling) of
                 true ->
-                    Merged = merge(Tx, Tree, Child1, Sibling),
+                    Merged = merge(Tree, Child1, Sibling),
                     update_prev_neighbour(Tx, Tree, Merged),
                     update_next_neighbour(Tx, Tree, Merged),
                     [Merged];
                 false ->
-                    {Left, Right} = rebalance(Tx, Tree, Child1, Sibling),
+                    {Left, Right} = rebalance(Tree, Child1, Sibling),
                     update_prev_neighbour(Tx, Tree, Left),
                     update_next_neighbour(Tx, Tree, Right),
                     [Left, Right]
@@ -688,11 +686,11 @@ delete(Tx, #tree{} = Tree, #node{} = Parent0, Key) ->
     end.
 
 
-merge(Tx, #tree{} = Tree, #node{level = Level} = Node1, #node{level = Level} = Node2) ->
+merge(#tree{} = Tree, #node{level = Level} = Node1, #node{level = Level} = Node2) ->
     [Left, Right] = sort_nodes(Tree, [Node1, Node2]),
 
     #node{
-        id = new_node_id(Tx, Tree),
+        id = new_node_id(),
         level = Level,
         prev = Left#node.prev,
         next = Right#node.next,
@@ -700,14 +698,14 @@ merge(Tx, #tree{} = Tree, #node{level = Level} = Node1, #node{level = Level} = N
     }.
 
 
-rebalance(Tx, #tree{} = Tree, #node{level = Level} = Node1, #node{level = Level} = Node2) ->
+rebalance(#tree{} = Tree, #node{level = Level} = Node1, #node{level = Level} = Node2) ->
     [Left0, Right0] = sort_nodes(Tree, [Node1, Node2]),
 
     Members = lists:append(Left0#node.members, Right0#node.members),
     {LeftMembers, RightMembers} = lists:split(length(Members) div 2, Members),
 
-    Left1Id = new_node_id(Tx, Tree),
-    Right1Id = new_node_id(Tx, Tree),
+    Left1Id = new_node_id(),
+    Right1Id = new_node_id(),
 
     Left1 = remove_pointers_if_not_leaf(Left0#node{
         id = Left1Id,
@@ -824,7 +822,7 @@ set_node(Tx, #tree{} = Tree, #node{} = Node) ->
     persist(Tree, Tx, set, [Key, Value]).
 
 
-node_key(Prefix, Id) when is_binary(Prefix), is_integer(Id) ->
+node_key(Prefix, Id) when is_binary(Prefix), is_binary(Id) ->
     erlfdb_tuple:pack({?NODE, Id}, Prefix).
 
 
@@ -1105,7 +1103,7 @@ new_node_id_if_cacheable(Tx, #tree{} = Tree, #node{} = Old, #node{} = New) ->
     if
         MembersChanged andalso NodeIsCacheable ->
             clear_node(Tx, Tree, New),
-            New#node{id = new_node_id(Tx, Tree)};
+            New#node{id = new_node_id()};
         true ->
             New
     end.
@@ -1121,10 +1119,8 @@ node_is_cacheable(#node{}) ->
     true.
 
 
-new_node_id(Tx, Tree) ->
-    NextId = get_meta(Tx, Tree, ?META_NEXT_ID),
-    set_meta(Tx, Tree, ?META_NEXT_ID, NextId + 1),
-    NextId.
+new_node_id() ->
+    crypto:strong_rand_bytes(16).
 
 
 %% remove prev/next pointers for nonleaf nodes
@@ -1135,10 +1131,22 @@ remove_pointers_if_not_leaf(#node{} = Node) ->
     Node#node{prev = undefined, next = undefined}.
 
 
-print_node(#node{} = Node) ->
-    io:format("#node{id = ~w, level = ~w, prev = ~w, next = ~w, members = ~w}~n~n",
-        [Node#node.id, Node#node.level, Node#node.prev, Node#node.next, Node#node.members]).
+print_node(#node{level = 0} = Node) ->
+    io:format("#node{id = ~s, level = ~w, prev = ~s, next = ~s, members = ~w}~n~n",
+        [b64(Node#node.id), Node#node.level, b64(Node#node.prev), b64(Node#node.next),
+        Node#node.members]);
 
+print_node(#node{} = Node) ->
+    io:format("#node{id = ~s, level = ~w, prev = ~s, next = ~s, members = ~s}~n~n",
+        [base64:encode(Node#node.id), Node#node.level, b64(Node#node.prev), b64(Node#node.next),
+        [io_lib:format("{~w, ~w, ~s, ~w}, ", [F, L, b64(P), R]) || {F, L, P, R} <- Node#node.members]]).
+
+
+b64(undefined) ->
+    undefined;
+
+b64(Bin) ->
+    base64:encode(Bin).
 
 %% tests
 
