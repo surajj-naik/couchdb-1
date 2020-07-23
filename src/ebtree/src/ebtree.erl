@@ -684,20 +684,38 @@ delete(Tx, #tree{} = Tree, #node{} = Parent0, Key) ->
             end, Members2, NewNodes),
 
             Parent1 = Parent0#node{
-                %% TODO change id
                 members = Members3
             },
+            Parent2 = if
+                Parent1#node.id == ?NODE_ROOT_ID ->
+                    Parent1;
+                Parent0#node.members == Parent1#node.members ->
+                    Parent1;
+                true ->
+                    clear_node(Tx, Tree, Parent1),
+                    Parent1#node{id = new_node_id(Tx, Tree)}
+            end,
 
             clear_nodes(Tx, Tree, [Child0, Sibling]),
             set_nodes(Tx, Tree, NewNodes),
-            Parent1;
+            Parent2;
         false ->
             set_node(Tx, Tree, Child0, Child1),
             {_OldFirstKey, _OldLastKey, ChildId0, _OldReduction} = lists:keyfind(ChildId0, 3, Parent0#node.members),
-            Parent0#node{
+            Parent1 = Parent0#node{
                 members = lists:keyreplace(ChildId0, 3, Parent0#node.members,
                     {first_key(Child1), last_key(Child1), Child1#node.id, reduce_node(Tree, Child1)})
-            }
+            },
+            Parent2 = if
+                Parent1#node.id == ?NODE_ROOT_ID ->
+                    Parent1;
+                Parent0#node.members == Parent1#node.members ->
+                    Parent1;
+                true ->
+                    clear_node(Tx, Tree, Parent1),
+                    Parent1#node{id = new_node_id(Tx, Tree)}
+            end,
+            Parent2
     end.
 
 
