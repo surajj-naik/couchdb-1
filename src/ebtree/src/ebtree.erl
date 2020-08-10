@@ -782,7 +782,7 @@ get_node(Tx, #tree{} = Tree, Id) ->
             Key = node_key(Tree#tree.prefix, Id),
             Value = persist(Tree, Tx, get, Key),
             Node = decode_node(Tree, Id, Key, Value),
-            cache(Tree, set, Node),
+            cache(Tree, set, [Id, Node]),
             Node;
         #node{} = Node ->
             Node
@@ -797,7 +797,7 @@ clear_nodes(Tx, #tree{} = Tree, Nodes) ->
 
 clear_node(Tx, #tree{} = Tree, #node{} = Node) ->
      Key = node_key(Tree#tree.prefix, Node#node.id),
-     cache(Tree, clear, Node),
+     cache(Tree, clear, Node#node.id),
      persist(Tree, Tx, clear, Key).
 
 
@@ -818,7 +818,7 @@ set_node(Tx, #tree{} = Tree, #node{} = Node) ->
     validate_node(Tree, Node),
     Key = node_key(Tree#tree.prefix, Node#node.id),
     Value = encode_node(Tree, Key, Node),
-    cache(Tree, set, Node),
+    cache(Tree, set, [Node#node.id, Node]),
     persist(Tree, Tx, set, [Key, Value]).
 
 
@@ -1046,27 +1046,25 @@ cache_noop(get, _) ->
     undefined.
 
 
-cache(#tree{} = Tree, Action, #node{} = Node) when Action == set; Action == clear ->
+cache(#tree{} = Tree, set, [Id, #node{} = Node]) ->
     #tree{cache_fun = CacheFun} = Tree,
-    NodeIsCacheable = node_is_cacheable(Node),
-    if
-        NodeIsCacheable andalso CacheFun /= undefined ->
-            CacheFun(Action, Node);
+    case node_is_cacheable(Node) of
         true ->
+            CacheFun(set, [Id, Node]);
+        false ->
             ok
     end;
+
+cache(#tree{} = Tree, clear, Id) ->
+    #tree{cache_fun = CacheFun} = Tree,
+    CacheFun(clear, Id);
 
 cache(#tree{} = _Tree, get, ?NODE_ROOT_ID) ->
     undefined;
 
 cache(#tree{} = Tree, get, Id) ->
     #tree{cache_fun = CacheFun} = Tree,
-    if
-        CacheFun /= undefined ->
-            CacheFun(get, Id);
-        true ->
-            undefined
-    end.
+    CacheFun(get, Id).
 
 %% private functions
 
@@ -1533,10 +1531,10 @@ cache_test_() ->
     {spawn, [fun() ->
         Db = erlfdb_util:get_test_db([empty]),
         CacheFun = fun
-            (set, Node) ->
-                erlang:put(Node#node.id, Node);
-            (clear, Node) ->
-                erlang:erase(Node#node.id);
+            (set, [Id, Node]) ->
+                erlang:put(Id, Node);
+            (clear, Id) ->
+                erlang:erase(Id);
             (get, Id) ->
                 erlang:get(Id)
         end,
